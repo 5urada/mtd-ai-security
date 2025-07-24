@@ -15,4 +15,4 @@ Moving Target Defense systems dynamically reconfigure network parameters to disr
 
 ## Collaboration
 
-This research is conducted at Texas A&M University in collaboration with the [SUCCESS Lab](https://success.cse.tamu.edu/). 
+This research is conducted at Texas A&M University in collaboration with [SUCCESS Lab](https://success.cse.tamu.edu/). 
