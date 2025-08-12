@@ -1,0 +1,8 @@
+[submodule "attackers/VulnBot_original"]
+	path = attackers/VulnBot_original
+	url = https://github.com/5urada/VulnBot.git
+	branch = main
+[submodule "attackers/VulnBot_modified"]
+	path = attackers/VulnBot_modified
+	url = https://github.com/5urada/VulnBot.git
+	branch = modified
