@@ -1,0 +1,115 @@
+# Feature Hunter - Data and Runtime Files
+
+# Run directories and data
+features/runs/
+features/latest
+
+# Capture data (these can be huge!)
+*.pcap
+*.pcapng
+capture/
+**/capture/
+
+# Log files
+*.log
+logs/
+**/logs/
+
+# ML Models and datasets
+*.pt
+*.pth
+*.pkl
+*.npy
+*.npz
+*.parquet
+*.h5
+*.hdf5
+
+# Generated features and results
+features/*.npy
+features/*.csv
+features/flows.parquet
+**/features/*.npy
+**/features/*.csv
+
+# Experiment outputs
+results.json
+**/results.json
+debate.json
+proposals.json
+verified.json
+
+# Figures and plots
+*.png
+*.pdf
+*.jpg
+*.jpeg
+figs/
+**/figs/
+
+# FAISS indices
+*.faiss
+*.index
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Large data files
+*.zip
+*.tar.gz
+*.tar.bz2
+
+# Config with sensitive info (if you add passwords/keys later)
+# config_prod.yaml

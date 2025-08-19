@@ -1,0 +1,35 @@
+# Core ML/Data Science
+numpy>=1.21.0
+pandas>=1.5.0
+scikit-learn>=1.2.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# PyTorch (CPU version - adjust if you need CUDA)
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Network Analysis
+scapy>=2.5.0
+pyshark>=0.4.5
+
+# Feature Engineering & Embeddings
+umap-learn>=0.5.0
+hdbscan>=0.8.0
+
+# Optional but useful
+tqdm>=4.64.0
+joblib>=1.2.0
+pyyaml>=6.0
+
+# For contrastive learning
+faiss-cpu>=1.7.0
+
+# For generative models (install separately if needed)
+# ctgan>=0.7.0
+
+# For time series
+tslearn>=0.6.0
+
+# For RAG experiments
+sentence-transformers>=2.2.0
