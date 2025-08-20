@@ -15,6 +15,10 @@ mkdir -p "$RUN_DIR"/{capture/{pcap,logs},features,exp_{clustering,autoencoder,co
 # Copy config to run directory
 cp config.yaml "$RUN_DIR/"
 
+# Copy scripts to run directory
+cp scripts/*.sh "$RUN_DIR/scripts/"
+chmod +x "$RUN_DIR/scripts/"*.sh
+
 # Create symlink to latest run
 rm -f "$BASE_DIR/latest"
 ln -sf "runs/$RUN_ID" "$BASE_DIR/latest"
