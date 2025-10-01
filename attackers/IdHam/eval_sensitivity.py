@@ -3,6 +3,7 @@ import numpy as np
 import json
 import os
 from pathlib import Path
+from env import AttackerType
 
 def evaluate_sensitivity(
     ckpt_path: str,
@@ -16,7 +17,7 @@ def evaluate_sensitivity(
     from metrics import compute_flip_sensitivity
     
     # Load checkpoint
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     config = checkpoint["config"]
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -118,17 +118,17 @@ def compute_flip_sensitivity(
     # Aggregate metrics
     total_comparisons = sum(host_total_counts)
     if total_comparisons > 0:
-        results["flip_rate_overall"] = total_flips / total_comparisons
-        results["kl_mean"] = total_kl / total_comparisons
-        results["tv_mean"] = total_tv / total_comparisons
-        results["assignment_hamming_mean"] = total_hamming / total_comparisons
-    
+        results["flip_rate_overall"] = float(total_flips / total_comparisons)
+        results["kl_mean"] = float(total_kl / total_comparisons)
+        results["tv_mean"] = float(total_tv / total_comparisons)
+        results["assignment_hamming_mean"] = float(total_hamming / total_comparisons)
+
     # Per-host breakdown
     for j in range(config.N):
         if host_total_counts[j] > 0:
             results["by_host"].append({
-                "host": j,
-                "flip_rate": host_flip_counts[j] / host_total_counts[j]
+                "host": int(j),  # Convert to Python int
+                "flip_rate": float(host_flip_counts[j] / host_total_counts[j])  # Convert to Python float
             })
     
     policy.train()
