@@ -4,6 +4,7 @@ from typing import List, Dict, Tuple
 from scipy.special import kl_div
 from config import Config
 from policy import ActorCritic
+import random
 
 def compute_flip_sensitivity(
     policy: "ActorCritic",
@@ -45,7 +46,8 @@ def compute_flip_sensitivity(
         
         # Generate feasible actions for original state
         feasible_orig = generate_feasible_assignments(
-            config, A_prev, S, config.K, use_ortools=False, seed=config.seed
+            config, A_prev, S, config.K, use_ortools=False, 
+            seed=random.randint(0, 1000000)
         )
         
         if len(feasible_orig) == 0:
@@ -54,7 +56,7 @@ def compute_flip_sensitivity(
         # Get policy distribution for original state
         with torch.no_grad():
             obs_tensor = torch.FloatTensor(state_vec).unsqueeze(0).to(device)
-            logits_orig, _ = policy(obs_tensor, len(feasible_orig))
+            logits_orig, _ = policy(obs_tensor, feasible_orig)
             probs_orig = torch.softmax(logits_orig, dim=-1).cpu().numpy()[0]
             action_orig = np.argmax(probs_orig)
         
@@ -65,7 +67,8 @@ def compute_flip_sensitivity(
             
             # Generate feasible actions for flipped state
             feasible_flipped = generate_feasible_assignments(
-                config, A_prev, S_flipped, config.K, use_ortools=False, seed=config.seed
+                config, A_prev, S_flipped, config.K, use_ortools=False, 
+                seed=random.randint(0, 1000000)  # Use random seed each time
             )
             
             if len(feasible_flipped) == 0:
@@ -84,7 +87,7 @@ def compute_flip_sensitivity(
             # Get policy distribution for flipped state
             with torch.no_grad():
                 obs_flipped_tensor = torch.FloatTensor(obs_flipped).unsqueeze(0).to(device)
-                logits_flipped, _ = policy(obs_flipped_tensor, len(feasible_flipped))
+                logits_flipped, _ = policy(obs_flipped_tensor, feasible_flipped)
                 probs_flipped = torch.softmax(logits_flipped, dim=-1).cpu().numpy()[0]
                 action_flipped = np.argmax(probs_flipped)
             

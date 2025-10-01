@@ -23,7 +23,7 @@ def train(config: Config, attacker_type: AttackerType = AttackerType.STATIC):
     env = IDHAMEnv(config, attacker_type)
     obs_dim = env.observation_dim
     
-    policy = ActorCritic(obs_dim).to(device)
+    policy = ActorCritic(obs_dim, config.N, config.B).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=config.lr)
     
     # Training loop
@@ -53,7 +53,7 @@ def train(config: Config, attacker_type: AttackerType = AttackerType.STATIC):
         
         # Select action
         obs_tensor = torch.FloatTensor(obs).to(device)
-        action, log_prob, value = policy.select_action(obs_tensor, len(feasible))
+        action, log_prob, value = policy.select_action(obs_tensor, feasible)
         
         # Environment step
         next_obs, reward, done, info = env.step(action, feasible)
@@ -63,7 +63,7 @@ def train(config: Config, attacker_type: AttackerType = AttackerType.STATIC):
         # Compute advantage (1-step TD)
         with torch.no_grad():
             next_obs_tensor = torch.FloatTensor(next_obs).to(device)
-            _, next_value = policy(next_obs_tensor.unsqueeze(0), len(feasible))
+            _, next_value = policy(next_obs_tensor.unsqueeze(0), feasible)
             if done:
                 next_value = torch.zeros_like(next_value)
             advantage = reward + config.gamma * next_value - value
@@ -76,7 +76,7 @@ def train(config: Config, attacker_type: AttackerType = AttackerType.STATIC):
         
         # Entropy bonus
         with torch.no_grad():
-            logits, _ = policy(obs_tensor.unsqueeze(0), len(feasible))
+            logits, _ = policy(obs_tensor.unsqueeze(0), feasible)
             probs = F.softmax(logits, dim=-1)
         entropy = -(probs * torch.log(probs + 1e-10)).sum()
         entropy_loss = -config.entropy_coef * entropy

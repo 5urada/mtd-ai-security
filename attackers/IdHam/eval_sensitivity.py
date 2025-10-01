@@ -24,7 +24,7 @@ def evaluate_sensitivity(
     
     # Initialize policy
     env = IDHAMEnv(config, attacker_type)
-    policy = ActorCritic(env.observation_dim).to(device)
+    policy = ActorCritic(env.observation_dim, config.N, config.B).to(device)
     policy.load_state_dict(checkpoint["policy_state_dict"])
     policy.eval()
     
