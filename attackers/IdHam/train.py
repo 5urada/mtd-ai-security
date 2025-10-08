@@ -9,7 +9,7 @@ import json
 import os
 from pathlib import Path
 
-def train(config: Config, attacker_type: AttackerType = AttackerType.STATIC):
+def train(config: Config, attacker_type: AttackerType = AttackerType.SEQUENTIAL):
     """Train ID-HAM policy using A2C."""
     from env import IDHAMEnv
     from policy import ActorCritic

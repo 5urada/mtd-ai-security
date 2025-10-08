@@ -113,7 +113,13 @@ def _generate_with_greedy(
     K: int,
     seed: Optional[int]
 ) -> List[np.ndarray]:
-    """Greedy repair heuristic for generating feasible assignments."""
+    """Greedy repair heuristic for generating feasible assignments with deterministic ordering."""
+    
+    # Use deterministic seed based on state if seed not provided
+    if seed is None:
+        state_hash = hash(tuple(S.tolist()) + tuple(A_prev.tolist()))
+        seed = abs(state_hash) % (2**31)
+    
     rng = np.random.RandomState(seed)
     N, B = config.N, config.B
     
@@ -122,7 +128,7 @@ def _generate_with_greedy(
     
     results = []
     
-    for _ in range(K * 3):  # Try multiple times
+    for attempt in range(K * 3):  # Try multiple times
         A_new = A_prev.copy()
         
         # Determine how many to mutate
@@ -154,14 +160,22 @@ def _generate_with_greedy(
             if not any(np.array_equal(A_new, existing) for existing in results):
                 results.append(A_new)
         
-        if len(results) >= K:
+        if len(results) >= K * 2:  # Collect extra for sorting
             break
     
     # Ensure at least one solution (keep A_prev if needed)
     if not results:
         results.append(A_prev.copy())
     
-    return results
+    # CRITICAL: Sort results deterministically for consistent ordering
+    results_sorted = sorted(results, key=lambda a: (
+        np.sum(a != A_prev),  # Primary: number of mutations
+        np.std([np.sum(a == k) for k in range(B)]),  # Secondary: block load variance
+        tuple(a.tolist())  # Tertiary: lexicographic ordering for tie-breaking
+    ))
+    
+    # Return top K
+    return results_sorted[:K]
 
 def _verify_constraints(config: Config, A_prev: np.ndarray, A_new: np.ndarray) -> bool:
     """Verify all constraints are satisfied."""

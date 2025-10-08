@@ -8,7 +8,7 @@ from env import AttackerType
 def evaluate_sensitivity(
     ckpt_path: str,
     num_samples: int = 200,
-    attacker_type: AttackerType = AttackerType.STATIC,
+    attacker_type: AttackerType = AttackerType.SEQUENTIAL,
     output_path: str = "reports/sensitivity.json"
 ):
     """Evaluate flip-sensitivity of trained policy."""
