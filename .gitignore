@@ -113,3 +113,13 @@ temp/
 
 # Config with sensitive info (if you add passwords/keys later)
 # config_prod.yaml
+
+attackers/IdHam/reports
+attackers/IdHam/runs
+
+attackers/idHam2/configs/
+attackers/idHam2/output/
+attackers/idHam2/test_output/
+attackers/idHam2/test_mini_config.yaml
+attackers/idHam2/run_all_experiments.sh
+attackers/idHam2/experiment*
