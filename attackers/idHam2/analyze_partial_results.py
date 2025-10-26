@@ -244,7 +244,7 @@ def project_completion(results_dir: Path):
         avg_time_per_config = 10  # minutes (adjust based on your observation)
         remaining_time = (total - completed) * avg_time_per_config
         
-        print(f"\n⏱   Estimated time remaining: {remaining_time/60:.1f} hours")
+        print(f"\n   Estimated time remaining: {remaining_time/60:.1f} hours")
         print(f"   (Assuming ~{avg_time_per_config} min per config)")
 
 

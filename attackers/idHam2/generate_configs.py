@@ -2,6 +2,9 @@
 """
 Generate all experiment configuration files for the full sweep.
 Creates YAML files for all combinations of parameters.
+
+FIX APPLIED:
+5. Generate baseline configurations for all (partitions, probe_budget) combinations
 """
 
 import yaml
@@ -9,39 +12,58 @@ from pathlib import Path
 from itertools import product
 
 
-def generate_baseline_config():
-    """Generate baseline-static configuration."""
-    config = {
-        'config_id': 'baseline_static_p4_b200',
-        'n_hosts': 100,
-        'partitioning': {
-            'mode': 'uniform',
-            'partitions': 4
-        },
-        'attacker': {
-            'strategy': 'divide_and_conquer',
-            'switch': {
-                'mode': 'periodic',
-                'mean_interval': 100000,  # Very long interval = effectively static
-                'jitter_pct': 0.0
+def generate_baseline_configs():
+    """
+    FIX 5: Generate baseline-static configurations for all combinations.
+    
+    Creates a baseline for every (partitions, probe_budget) pair to enable
+    fair comparisons with dynamic attacker configs.
+    """
+    configs = []
+    
+    # FIX 5: Generate baselines for all parameter combinations
+    partitions_list = [2, 4, 8, 16, 32]
+    probe_budgets = [100, 200, 500]
+    
+    n_hosts = 100
+    n_seeds = 10
+    
+    for p, budget in product(partitions_list, probe_budgets):
+        config_id = f'baseline_static_p{p}_b{budget}'
+        
+        config = {
+            'config_id': config_id,
+            'n_hosts': n_hosts,
+            'partitioning': {
+                'mode': 'uniform',
+                'partitions': p
+            },
+            'attacker': {
+                'strategy': 'divide_and_conquer',
+                'switch': {
+                    'mode': 'periodic',
+                    'mean_interval': 100000,  # Very long interval = effectively static
+                    'jitter_pct': 0.0
+                }
+            },
+            'probe_budget': budget,
+            'episodes': {
+                'train': 5000,
+                'eval_window': 200
+            },
+            'seeds': n_seeds,
+            'metrics': {
+                'window': 200,
+                'adaptation_epsilon': 0.10
+            },
+            'logging': {
+                'per_episode_csv': True,
+                'aggregate_json': True
             }
-        },
-        'probe_budget': 200,
-        'episodes': {
-            'train': 5000,
-            'eval_window': 200
-        },
-        'seeds': 10,
-        'metrics': {
-            'window': 200,
-            'adaptation_epsilon': 0.10
-        },
-        'logging': {
-            'per_episode_csv': True,
-            'aggregate_json': True
         }
-    }
-    return config
+        configs.append(config)
+    
+    return configs
 
 
 def generate_experiment_configs():
@@ -49,7 +71,7 @@ def generate_experiment_configs():
     configs = []
     
     # Parameter ranges
-    partitions_list = [2, 4, 8, 16]
+    partitions_list = [2, 4, 8, 16, 32]
     partition_modes = ['uniform', 'skewed']
     switch_intervals = [100, 500, 2000]
     jitter_pcts = [0.0, 0.10, 0.30]
@@ -161,24 +183,28 @@ def generate_batch_run_script(configs: list, output_dir: Path):
 def main():
     configs_dir = Path('configs')
     
-    # Generate baseline config
-    baseline = generate_baseline_config()
-    save_configs([baseline], configs_dir)
+    # FIX 5: Generate baseline configs for all combinations
+    baseline_configs = generate_baseline_configs()
+    save_configs(baseline_configs, configs_dir)
     
     # Generate full experiment sweep
     exp_configs = generate_experiment_configs()
     save_configs(exp_configs, configs_dir)
     
     # Generate batch run script
-    all_configs = [baseline] + exp_configs
+    all_configs = baseline_configs + exp_configs
     generate_batch_run_script(all_configs, configs_dir)
     
     print(f"\nSummary:")
-    print(f"  Baseline configs: 1")
+    print(f"  Baseline configs: {len(baseline_configs)}")
     print(f"  Experiment configs: {len(exp_configs)}")
     print(f"  Total configs: {len(all_configs)}")
-    print(f"\nParameter space:")
-    print(f"  Partitions: [2, 4, 8, 16]")
+    print(f"\nFIX 5: Now generating baselines for all (partitions, probe_budget) combinations:")
+    print(f"  Partitions: [2, 4, 8, 16, 32]")
+    print(f"  Probe budgets: [100, 200, 500]")
+    print(f"  Total baselines: {len(baseline_configs)}")
+    print(f"\nDynamic attacker parameter space:")
+    print(f"  Partitions: [2, 4, 8, 16, 32]")
     print(f"  Modes: [uniform, skewed]")
     print(f"  Switch intervals: [100, 500, 2000]")
     print(f"  Jitter: [0%, 10%, 30%]")

@@ -1,6 +1,10 @@
 """
 Defender (ID-HAM) implementation with adaptive masking.
 Simplified model that learns to mask addresses based on attacker behavior.
+
+FIX APPLIED:
+3. QoS cost model separated into control-plane and data-plane costs
+7. Added mask saturation metric
 """
 
 import numpy as np
@@ -31,14 +35,20 @@ class IDHAMDefender:
         self.mask_capacity = int(n_hosts * 0.3)  # Can mask up to 30% of addresses
         self.learning_rate = 0.001
         self.exploration_rate = 0.1
-        self.qos_cost_per_mask = 0.5  # ms penalty per masked address
+        
+        # FIX 3: Separate QoS costs
+        self.qos_cost_per_mask_data = 0.5  # ms penalty per masked probe (data-plane)
+        self.qos_cost_per_flow_mod_ctrl = 2.0  # ms penalty per flow modification (control-plane)
         
         # State tracking
         self.current_masked = set()
         self.previous_masked = set()
         self.hit_history = []
         self.episode_flow_mods = 0
-        self.episode_qos_penalty = 0.0
+        
+        # FIX 3: Separate QoS tracking
+        self.episode_qos_data_ms = 0.0  # Data-plane cost (probing masked addresses)
+        self.episode_qos_ctrl_ms = 0.0  # Control-plane cost (flow modifications)
         
         # Simple policy: track hit frequencies and mask high-hit addresses
         self.address_hit_counts = np.zeros(n_hosts)
@@ -71,7 +81,9 @@ class IDHAMDefender:
         """Reset per-episode state."""
         self.previous_masked = self.current_masked.copy()
         self.episode_flow_mods = 0
-        self.episode_qos_penalty = 0.0
+        # FIX 3: Reset both QoS cost trackers
+        self.episode_qos_data_ms = 0.0
+        self.episode_qos_ctrl_ms = 0.0
     
     def apply_defense(self, target: int, probe_idx: int) -> Tuple[bool, float]:
         """
@@ -82,8 +94,10 @@ class IDHAMDefender:
             qos_cost: QoS penalty incurred (ms)
         """
         is_masked = target in self.current_masked
-        qos_cost = self.qos_cost_per_mask if is_masked else 0.0
-        self.episode_qos_penalty += qos_cost
+        
+        # FIX 3: Data-plane cost (probing masked address)
+        qos_cost = self.qos_cost_per_mask_data if is_masked else 0.0
+        self.episode_qos_data_ms += qos_cost
         
         # Track probe
         self.address_probe_counts[target] += 1
@@ -105,11 +119,14 @@ class IDHAMDefender:
         
         # Update masking policy (every N episodes to avoid thrashing)
         # Skip episode 0 to keep initial random masking
-        if episode > 0 and episode % 50 == 0:  # Changed from: if episode % 50 == 0:
+        if episode > 0 and episode % 50 == 0:
             self._update_masking_policy()
     
     def _update_masking_policy(self):
-        """Update which addresses to mask based on learned statistics."""
+        """
+        Update which addresses to mask based on learned statistics.
+        FIX 3: Charges control-plane cost when masks change.
+        """
         # Simple heuristic policy: mask addresses with highest hit rates
         # Hit rate = hits / probes (with Laplace smoothing)
         hit_rates = (self.address_hit_counts + 1) / (self.address_probe_counts + 2)
@@ -120,7 +137,7 @@ class IDHAMDefender:
         
         # If we don't have enough data yet, keep current masking
         # Require at least 10 probed addresses before updating
-        if n_probed < 10:  # Changed from: if n_probed < self.mask_capacity:
+        if n_probed < 10:
             return  # Not enough data, keep current masks
         
         # Set hit rate to -1 for unprobed addresses so they won't be selected
@@ -143,6 +160,9 @@ class IDHAMDefender:
         # Count flow modifications (addresses whose mask state changed)
         changed_addresses = (new_masked - self.current_masked) | (self.current_masked - new_masked)
         self.episode_flow_mods = len(changed_addresses)
+        
+        # FIX 3: Charge control-plane cost for flow modifications
+        self.episode_qos_ctrl_ms = self.episode_flow_mods * self.qos_cost_per_flow_mod_ctrl
         
         self.current_masked = new_masked
     
@@ -168,12 +188,41 @@ class IDHAMDefender:
                len(self.previous_masked - self.current_masked) > 0
     
     def get_qos_penalty(self) -> float:
-        """Return accumulated QoS penalty this episode (in ms)."""
-        return self.episode_qos_penalty
+        """
+        Return accumulated QoS penalty this episode (in ms).
+        FIX 3: Returns total of both control and data plane costs.
+        """
+        return self.episode_qos_data_ms + self.episode_qos_ctrl_ms
+    
+    # FIX 3: New methods to get separated QoS costs
+    def get_qos_data_plane_ms(self) -> float:
+        """Return data-plane QoS cost (masked probes) for this episode."""
+        return self.episode_qos_data_ms
+    
+    def get_qos_control_plane_ms(self) -> float:
+        """Return control-plane QoS cost (flow modifications) for this episode."""
+        return self.episode_qos_ctrl_ms
     
     def get_current_masked_set(self) -> Set[int]:
         """Return current set of masked addresses."""
         return self.current_masked.copy()
+    
+    # FIX 7: New method for mask saturation metric
+    def get_mask_saturation(self, current_partition_hosts: Set[int]) -> float:
+        """
+        Calculate what fraction of current partition is masked.
+        
+        Args:
+            current_partition_hosts: Set of hosts in current active partition
+            
+        Returns:
+            Fraction of partition that is masked (0.0 to 1.0)
+        """
+        if len(current_partition_hosts) == 0:
+            return 0.0
+        
+        masked_in_partition = len(self.current_masked & current_partition_hosts)
+        return masked_in_partition / len(current_partition_hosts)
 
 
 class StaticDefender(IDHAMDefender):

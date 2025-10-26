@@ -1,6 +1,9 @@
 """
 Attacker strategies for ID-HAM experiment.
 Implements divide-and-conquer partitioning with timing variations.
+
+FIX APPLIED:
+2. Probe selection without replacement within each episode
 """
 
 import numpy as np
@@ -39,6 +42,11 @@ class DivideConquerAttacker:
         self.current_partition_idx = 0
         self.next_switch_episode = self._schedule_next_switch(0)
         self.switch_history = []
+        
+        # FIX 2: Add state for sampling without replacement
+        self.current_shuffle = None
+        self.shuffle_position = 0
+        self.last_partition_idx = None
         
     def _create_partitions(self) -> List[Set[int]]:
         """Create address space partitions based on mode."""
@@ -109,6 +117,13 @@ class DivideConquerAttacker:
             })
             # Schedule next switch
             self.next_switch_episode = self._schedule_next_switch(episode)
+            
+            # FIX 2: Reset shuffle when partition changes
+            self.current_shuffle = None
+            self.shuffle_position = 0
+        
+        # FIX 2: Track partition changes
+        self.last_partition_idx = self.current_partition_idx
         
         return self.current_partition_idx
     
@@ -118,11 +133,31 @@ class DivideConquerAttacker:
     
     def select_target(self, target_hosts: Set[int], probe_idx: int) -> int:
         """
-        Select a target host from the current partition.
-        Simple uniform random selection from partition.
+        FIX 2: Select a target host from the current partition WITHOUT REPLACEMENT.
+        
+        Within each episode, we shuffle the partition once and cycle through it.
+        This prevents duplicate probes to the same target within an episode.
+        
+        Args:
+            target_hosts: Set of hosts in current partition
+            probe_idx: Index of current probe (resets each episode at 0)
+            
+        Returns:
+            Selected target host address
         """
-        targets_list = list(target_hosts)
-        return self.rng.choice(targets_list)
+        # FIX 2: Initialize shuffle at start of episode (probe_idx == 0)
+        # or when partition changes
+        if probe_idx == 0 or self.current_shuffle is None:
+            targets_list = list(target_hosts)
+            self.rng.shuffle(targets_list)
+            self.current_shuffle = targets_list
+            self.shuffle_position = 0
+        
+        # FIX 2: Select target using modulo indexing (cycle through shuffle)
+        target = self.current_shuffle[self.shuffle_position % len(self.current_shuffle)]
+        self.shuffle_position += 1
+        
+        return target
     
     def get_partition_sizes(self) -> List[int]:
         """Return sizes of all partitions."""

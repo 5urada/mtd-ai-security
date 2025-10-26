@@ -1,5 +1,8 @@
 """
 Metrics logging and analysis utilities.
+
+FIX APPLIED:
+4. Adaptation lag lower bound corrected to allow recovery < 100 episodes
 """
 
 import csv
@@ -97,10 +100,13 @@ def compute_adaptation_lag(
     epsilon: float
 ) -> List[int]:
     """
-    Compute adaptation lag after each attacker switch.
+    FIX 4: Compute adaptation lag after each attacker switch with corrected lower bound.
     
     Adaptation lag = number of episodes until defender's windowed TSH
     returns to within epsilon of pre-switch baseline.
+    
+    The search now starts from switch_ep + 1 instead of switch_ep + window_size,
+    allowing detection of adaptation lag < window_size episodes.
     
     Args:
         all_metrics: List of per-episode metrics
@@ -124,12 +130,14 @@ def compute_adaptation_lag(
         baseline_metrics = all_metrics[baseline_start:baseline_end]
         baseline_tsh = np.mean([m['tsh'] for m in baseline_metrics])
         
-        # Find recovery point: first episode after switch where windowed TSH
-        # is within epsilon of baseline
+        # FIX 4: Find recovery point starting from switch_ep + 1
+        # This allows adaptation lag to be less than window_size
         recovery_ep = None
-        for ep in range(switch_ep + window_size, len(all_metrics)):  # Changed: start from switch + window_size
-            # Compute windowed TSH using ONLY post-switch episodes
-            window_start = max(switch_ep, ep - window_size)  # Changed: don't go before switch
+        
+        for ep in range(switch_ep + 1, len(all_metrics)):  # Changed from: switch_ep + window_size
+            # FIX 4: Compute windowed TSH using ONLY post-switch episodes
+            # Window starts at max(switch_ep + 1, ep - window_size + 1)
+            window_start = max(switch_ep + 1, ep - window_size + 1)  # Changed from: max(switch_ep, ep - window_size)
             window_metrics = all_metrics[window_start:ep+1]
             
             if len(window_metrics) < window_size // 2:
@@ -239,12 +247,14 @@ def load_csv_metrics(csv_path: Path) -> List[Dict]:
         for row in reader:
             # Convert numeric fields
             for key in ['episode', 'tsh', 'hits_count', 'discovered_hosts_count',
+                       'discovered_hosts_cumulative',  # Added for cumulative tracking
                        'flow_mods_count', 'mask_change_flag', 'probe_budget',
                        'partition_id', 'seed']:
                 if key in row:
                     row[key] = int(row[key])
             
-            for key in ['coverage', 'policy_entropy', 'qos_penalty_proxy_ms']:
+            for key in ['coverage', 'policy_entropy', 'qos_penalty_proxy_ms',
+                       'tsh_per_100_probes']:  # Added normalized metric
                 if key in row:
                     row[key] = float(row[key])
             

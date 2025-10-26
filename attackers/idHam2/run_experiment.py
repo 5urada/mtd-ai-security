@@ -2,6 +2,15 @@
 """
 ID-HAM Divide & Conquer + Timing Variations Experiment Runner
 Runs experiments as specified in the experiment prompt document.
+
+FIXES APPLIED:
+1. Cumulative coverage tracking across episodes
+2. Added tsh_per_100_probes normalization metric
+
+NDV ENHANCEMENTS APPLIED:
+3. Support for multiple defender types (idham, static_mask, random_mtd)
+4. Seed matching for strata comparisons
+5. NDV instrumentation (switch tracking, dwell time, mask saturation, etc.)
 """
 
 import argparse
@@ -17,6 +26,7 @@ import sys
 
 from src.attacker import DivideConquerAttacker
 from src.defender import IDHAMDefender
+from src.defender_baselines import StaticMaskDefender, RandomizedMTDDefender  # NDV: New defenders
 from src.environment import NetworkEnvironment
 from src.metrics import MetricsLogger, compute_windowed_metrics, compute_adaptation_lag
 from src.utils import set_seed, create_directories
@@ -37,15 +47,19 @@ def load_config(config_path: str) -> Dict:
 def run_single_episode(
     env: NetworkEnvironment,
     attacker: DivideConquerAttacker,
-    defender: IDHAMDefender,
+    defender,  # NDV: Generic type (can be any defender)
     episode: int,
-    probe_budget: int
+    probe_budget: int,
+    discovered_hosts_global: set,  # FIX 1: Global cumulative tracking
+    dwell_time_active: int = 0,  # NDV: Episodes since last switch
+    last_partition_id: Optional[int] = None  # NDV: For switch detection
 ) -> Dict:
     """
     Run a single episode and return metrics.
     
     Returns dict with keys: tsh, hits_count, discovered_hosts_count, coverage,
-    policy_entropy, flow_mods_count, mask_change_flag, qos_penalty_proxy_ms
+    policy_entropy, flow_mods_count, mask_change_flag, qos_penalty_proxy_ms,
+    plus NDV instrumentation fields
     """
     # Reset episode state
     env.reset()
@@ -55,10 +69,14 @@ def run_single_episode(
     partition_id = attacker.get_current_partition(episode)
     target_hosts = attacker.get_partition_targets(partition_id)
     
+    # NDV: Detect switch
+    is_switch = (partition_id != last_partition_id) if last_partition_id is not None else False
+    
     # Attacker performs probing
     probe_results = []
     hits_count = 0
-    discovered_hosts = set()
+    discovered_hosts_this_episode = set()  # Per-episode discoveries
+    masked_probe_count = 0  # NDV: Count masked probes
     
     for probe_idx in range(probe_budget):
         # Attacker selects target from current partition
@@ -67,12 +85,17 @@ def run_single_episode(
         # Defender applies masking/defense
         is_masked, qos_cost = defender.apply_defense(target, probe_idx)
         
+        # NDV: Track masked probes
+        if is_masked:
+            masked_probe_count += 1
+        
         # Check if probe hits a real host
         is_hit = env.probe(target, is_masked)
         
         if is_hit:
             hits_count += 1
-            discovered_hosts.add(target)
+            discovered_hosts_this_episode.add(target)
+            discovered_hosts_global.add(target)  # FIX 1: Add to global set
             probe_results.append({
                 'probe_idx': probe_idx,
                 'target': target,
@@ -83,33 +106,53 @@ def run_single_episode(
     # Calculate Times of Scanning Hits (TSH)
     tsh = len([p for p in probe_results if p['is_hit']])
     
-    # Coverage
-    coverage = len(discovered_hosts) / env.n_real_hosts
+    # FIX 1: Coverage is now cumulative across all episodes
+    coverage = len(discovered_hosts_global) / env.n_real_hosts
     
     # Update defender (learning step if training)
-    # MOVED HERE - before getting metrics so flow_mods are captured
-    defender.update(hits_count, discovered_hosts, episode)
+    defender.update(hits_count, discovered_hosts_this_episode, episode)
     
     # Get defender metrics (AFTER update so flow_mods are set)
     policy_entropy = defender.get_policy_entropy()
     flow_mods_count = defender.get_flow_mods_count()
     mask_change_flag = defender.did_mask_change()
-    qos_penalty_proxy_ms = defender.get_qos_penalty()
+    
+    # FIX 3: Get separated QoS costs
+    qos_data_ms = defender.get_qos_data_plane_ms()
+    qos_ctrl_ms = defender.get_qos_control_plane_ms()
+    qos_penalty_proxy_ms = qos_data_ms + qos_ctrl_ms
+    
+    # NDV: Calculate mask saturation for current partition
+    mask_saturation = defender.get_mask_saturation(target_hosts)
+    
+    # FIX 6: Add normalized TSH metric
+    tsh_per_100_probes = (tsh / probe_budget) * 100 if probe_budget > 0 else 0
     
     metrics = {
         'tsh': tsh,
+        'tsh_per_100_probes': tsh_per_100_probes,  # FIX 6: Normalized metric
         'hits_count': hits_count,
-        'discovered_hosts_count': len(discovered_hosts),
-        'coverage': coverage,
+        'discovered_hosts_count': len(discovered_hosts_this_episode),
+        'discovered_hosts_cumulative': len(discovered_hosts_global),  # FIX 1: Track cumulative
+        'coverage': coverage,  # FIX 1: Now cumulative
         'policy_entropy': policy_entropy,
         'flow_mods_count': flow_mods_count,
         'mask_change_flag': int(mask_change_flag),
         'qos_penalty_proxy_ms': qos_penalty_proxy_ms,
+        'qos_data_plane_ms': qos_data_ms,  # FIX 3: Separated
+        'qos_control_plane_ms': qos_ctrl_ms,  # FIX 3: Separated
         'partition_id': partition_id,
-        'probe_budget': probe_budget
+        'probe_budget': probe_budget,
+        # NDV instrumentation fields
+        'is_switch': int(is_switch),
+        'dwell_time_active': dwell_time_active,
+        'focus_partition_id': partition_id,
+        'masked_probe_count': masked_probe_count,
+        'mask_saturation_active_partition': mask_saturation,
     }
     
     return metrics
+
 
 def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
     """
@@ -117,8 +160,17 @@ def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
     
     Returns summary statistics for this seed.
     """
-    # Set seed for reproducibility
-    set_seed(seed)
+    # NDV: Seed matching for strata
+    seed_strategy = config.get('seed_strategy', 'independent')
+    if seed_strategy == 'matched':
+        matched_group_id = config.get('matched_seed_group_id', 'default')
+        # Generate deterministic seed from group ID
+        base_seed = hash(matched_group_id) & 0x7FFFFFFF  # Keep positive
+        actual_seed = base_seed + seed
+        set_seed(actual_seed)
+        print(f"[Seed {seed}] Using matched seed: {actual_seed} (group: {matched_group_id})")
+    else:
+        set_seed(seed)
     
     config_id = config['config_id']
     n_hosts = config['n_hosts']
@@ -138,11 +190,20 @@ def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
         seed=seed
     )
     
-    defender = IDHAMDefender(
-        n_hosts=n_hosts,
-        config=config,
-        seed=seed
-    )
+    # NDV: Initialize defender based on type
+    defender_cfg = config.get('defender', {'type': 'idham'})
+    defender_type = defender_cfg.get('type', 'idham')
+    
+    if defender_type == 'idham':
+        defender = IDHAMDefender(n_hosts=n_hosts, config=config, seed=seed)
+    elif defender_type == 'static_mask':
+        defender = StaticMaskDefender(n_hosts=n_hosts, config=config, seed=seed)
+    elif defender_type == 'random_mtd':
+        defender = RandomizedMTDDefender(n_hosts=n_hosts, config=config, seed=seed)
+    else:
+        raise ValueError(f"Unknown defender type: {defender_type}")
+    
+    print(f"[Seed {seed}] Using defender type: {defender_type}")
     
     # Setup logging
     log_dir = output_dir / 'logs' / config_id
@@ -154,6 +215,10 @@ def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
     # Track switch points for adaptation lag calculation
     switch_points = []
     last_partition = None
+    last_switch_episode = 0  # NDV: Track for dwell time
+    
+    # FIX 1: Initialize global cumulative discovered hosts set
+    discovered_hosts_global = set()
     
     # Main training/evaluation loop
     all_metrics = []
@@ -163,12 +228,19 @@ def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
         current_partition = attacker.get_current_partition(episode)
         if last_partition is not None and current_partition != last_partition:
             switch_points.append(episode)
+            last_switch_episode = episode
             print(f"[Seed {seed}] Episode {episode}: Attacker switched to partition {current_partition}")
         last_partition = current_partition
         
-        # Run episode
+        # NDV: Calculate dwell time
+        dwell_time = episode - last_switch_episode
+        
+        # Run episode with cumulative tracking and NDV instrumentation
         episode_metrics = run_single_episode(
-            env, attacker, defender, episode, probe_budget
+            env, attacker, defender, episode, probe_budget, 
+            discovered_hosts_global,
+            dwell_time_active=dwell_time,
+            last_partition_id=last_partition if episode > 0 else None
         )
         
         # Add metadata
@@ -189,7 +261,7 @@ def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
             recent_tsh = np.mean([m['tsh'] for m in all_metrics[-100:]])
             recent_coverage = np.mean([m['coverage'] for m in all_metrics[-100:]])
             print(f"[Seed {seed}] Episode {episode+1}/{episodes_train}: "
-                  f"TSH={recent_tsh:.2f}, Coverage={recent_coverage:.3f}")
+                  f"TSH={recent_tsh:.2f}, Coverage={recent_coverage:.3f} (cumulative)")
     
     metrics_logger.close()
     
@@ -207,24 +279,33 @@ def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
     
     # Compute summary statistics
     tsh_values = [m['tsh'] for m in all_metrics]
+    tsh_per_100_values = [m['tsh_per_100_probes'] for m in all_metrics]  # FIX 6
     coverage_values = [m['coverage'] for m in all_metrics]
+    dwell_times = [m['dwell_time_active'] for m in all_metrics]  # NDV
+    mask_saturations = [m['mask_saturation_active_partition'] for m in all_metrics]  # NDV
     
     summary = {
         'seed': seed,
         'config_id': config_id,
+        'defender_type': defender_type,  # NDV
         'n_episodes': len(all_metrics),
         'n_switches': len(switch_points),
         'switch_points': switch_points,
         'tsh_median': float(np.median(tsh_values)),
         'tsh_mean': float(np.mean(tsh_values)),
         'tsh_std': float(np.std(tsh_values)),
+        'tsh_per_100_median': float(np.median(tsh_per_100_values)),  # FIX 6
+        'tsh_per_100_mean': float(np.mean(tsh_per_100_values)),  # FIX 6
         'coverage_final': float(coverage_values[-1]),
         'coverage_mean': float(np.mean(coverage_values)),
         'windowed_tsh_auc': float(np.sum([w['tsh_mean'] for w in windowed_metrics])),
         'adaptation_lags': adaptation_lags,
         'median_adaptation_lag': float(np.median(adaptation_lags)) if adaptation_lags else None,
         'mean_qos_proxy_ms': float(np.mean([m['qos_penalty_proxy_ms'] for m in all_metrics])),
-        'mean_flow_mods': float(np.mean([m['flow_mods_count'] for m in all_metrics]))
+        'mean_flow_mods': float(np.mean([m['flow_mods_count'] for m in all_metrics])),
+        # NDV statistics
+        'mean_dwell_time': float(np.mean(dwell_times)),
+        'mean_mask_saturation': float(np.mean(mask_saturations)),
     }
     
     # Save windowed metrics
@@ -233,6 +314,8 @@ def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
         json.dump(windowed_metrics, f, indent=2)
     
     print(f"[Seed {seed}] Completed. TSH median: {summary['tsh_median']:.2f}, "
+          f"TSH/100 median: {summary['tsh_per_100_median']:.2f}, "
+          f"Coverage final: {summary['coverage_final']:.3f}, "
           f"Adaptation lag median: {summary['median_adaptation_lag']}")
     
     return summary
@@ -244,6 +327,7 @@ def aggregate_results(summaries: List[Dict], config: Dict, output_dir: Path):
     
     # Aggregate statistics
     tsh_medians = [s['tsh_median'] for s in summaries]
+    tsh_per_100_medians = [s['tsh_per_100_median'] for s in summaries]  # FIX 6
     windowed_tsh_aucs = [s['windowed_tsh_auc'] for s in summaries]
     adaptation_lags_all = []
     for s in summaries:
@@ -255,10 +339,14 @@ def aggregate_results(summaries: List[Dict], config: Dict, output_dir: Path):
     
     aggregated = {
         'config_id': config_id,
+        'defender_type': config.get('defender', {}).get('type', 'idham'),  # NDV
         'n_seeds': len(summaries),
         'tsh_median_across_seeds': float(np.median(tsh_medians)),
         'tsh_median_iqr': [float(np.percentile(tsh_medians, 25)), 
                            float(np.percentile(tsh_medians, 75))],
+        'tsh_per_100_median_across_seeds': float(np.median(tsh_per_100_medians)),  # FIX 6
+        'tsh_per_100_iqr': [float(np.percentile(tsh_per_100_medians, 25)),
+                            float(np.percentile(tsh_per_100_medians, 75))],  # FIX 6
         'windowed_tsh_auc_median': float(np.median(windowed_tsh_aucs)),
         'windowed_tsh_auc_iqr': [float(np.percentile(windowed_tsh_aucs, 25)),
                                   float(np.percentile(windowed_tsh_aucs, 75))],
@@ -283,6 +371,7 @@ def aggregate_results(summaries: List[Dict], config: Dict, output_dir: Path):
     print(f"AGGREGATED RESULTS: {config_id}")
     print(f"{'='*60}")
     print(f"Windowed TSH AUC (median): {aggregated['windowed_tsh_auc_median']:.2f}")
+    print(f"TSH per 100 probes (median): {aggregated['tsh_per_100_median_across_seeds']:.2f}")
     print(f"Adaptation Lag (median): {aggregated['adaptation_lag_median']}")
     print(f"Mean QoS Proxy (ms): {aggregated['mean_qos_proxy_ms']:.2f}")
     print(f"Mean Flow Mods: {aggregated['mean_flow_mods']:.2f}")
