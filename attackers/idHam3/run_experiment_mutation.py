@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-ID-HAM Experiment Runner with TRUE ADDRESS MUTATION
+FIXED: ID-HAM Experiment Runner with TRUE ADDRESS MUTATION
 
-This replaces the masking approach with actual address mutation.
-Compatible with all new defender types: idham_mutation, frvm, rhm, static_mutation
+BUG FIX: Partition switching now works correctly!
+- Removed double call to get_current_partition()
+- Pass partition_id, is_switch, and targets directly to run_single_episode_mutation()
+- This ensures is_switch is detected correctly
+
+Compatible with all defender types: idham_mutation, frvm, rhm, static_mutation
 """
 
 import argparse
@@ -14,7 +18,7 @@ import torch
 import csv
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 import sys
 
 # Import mutation-based components
@@ -64,17 +68,16 @@ def run_single_episode_mutation(
     episode: int,
     probe_budget: int,
     discovered_hosts_global: set,  # Cumulative PHYSICAL hosts discovered
-    dwell_time_active: int = 0,
-    last_partition_id: Optional[int] = None
+    partition_id: int,  # ✅ FIX: Pass partition directly (not computed inside)
+    target_hosts: Set[int],  # ✅ FIX: Pass targets directly
+    is_switch: bool,  # ✅ FIX: Pass is_switch directly from caller
+    dwell_time_active: int = 0
 ) -> Dict:
     """
-    Run a single episode with TRUE ADDRESS MUTATION.
+    FIXED: Run a single episode with TRUE ADDRESS MUTATION.
     
-    Key differences from masking:
-    1. Attacker probes VIRTUAL IPs
-    2. Defender resolves virtual IP → physical host  
-    3. Environment checks if PHYSICAL host is real
-    4. Track mutations instead of masks
+    Key fix: partition_id, target_hosts, and is_switch are now passed in
+    from the caller to avoid double-calling get_current_partition().
     
     Returns dict with metrics including mutation instrumentation
     """
@@ -82,12 +85,8 @@ def run_single_episode_mutation(
     env.reset()
     defender.reset_episode()
     
-    # Get current attacker partition
-    partition_id = attacker.get_current_partition(episode)
-    target_hosts = attacker.get_partition_targets(partition_id)
-    
-    # Detect switch
-    is_switch = (partition_id != last_partition_id) if last_partition_id is not None else False
+    # ✅ FIX: No more calls to get_current_partition() here!
+    # We receive partition_id, target_hosts, and is_switch from caller
     
     # Attacker performs probing
     hits_count = 0
@@ -146,20 +145,20 @@ def run_single_episode_mutation(
         'discovered_hosts_cumulative': len(discovered_hosts_global),
         'coverage': coverage,
         'policy_entropy': policy_entropy,
-        'mutation_count': mutation_count,  # RENAMED from flow_mods_count
-        'mutation_flag': int(mutation_flag),  # RENAMED from mask_change_flag
+        'mutation_count': mutation_count,
+        'mutation_flag': int(mutation_flag),
         'qos_penalty_proxy_ms': qos_data_ms + qos_ctrl_ms,
         'qos_data_plane_ms': qos_data_ms,
         'qos_control_plane_ms': qos_ctrl_ms,
         'partition_id': partition_id,
         'probe_budget': probe_budget,
         # Mutation instrumentation
-        'is_switch': int(is_switch),
+        'is_switch': int(is_switch),  # ✅ FIX: Now correctly reflects actual switches!
         'dwell_time_active': dwell_time_active,
         'focus_partition_id': partition_id,
         'mutated_probe_count': mutated_probe_count,
-        'mutation_saturation_active_partition': mutation_saturation,  # RENAMED
-        'address_entropy': address_entropy,  # NEW metric
+        'mutation_saturation_active_partition': mutation_saturation,
+        'address_entropy': address_entropy,
     }
     
     return metrics
@@ -236,24 +235,36 @@ def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
     all_metrics = []
     
     for episode in range(episodes_train):
-        # Check for attacker switch
+        # ✅ FIX: Call get_current_partition() ONLY ONCE per episode
         current_partition = attacker.get_current_partition(episode)
+        
+        # ✅ FIX: Detect switch by comparing to last_partition
         if last_partition is not None and current_partition != last_partition:
+            is_switch_this_episode = True
             switch_points.append(episode)
             last_switch_episode = episode
-            print(f"[Seed {seed}] Episode {episode}: Attacker switched to partition {current_partition}")
-        last_partition = current_partition
+            print(f"[Seed {seed}] Episode {episode}: Attacker switched from partition {last_partition} to {current_partition}")
+        else:
+            is_switch_this_episode = False
         
         # Calculate dwell time
         dwell_time = episode - last_switch_episode
         
-        # Run episode with MUTATION
+        # ✅ FIX: Get partition targets HERE (not in run_single_episode_mutation)
+        target_hosts = attacker.get_partition_targets(current_partition)
+        
+        # ✅ FIX: Run episode with pre-computed values
         episode_metrics = run_single_episode_mutation(
             env, attacker, defender, episode, probe_budget,
             discovered_hosts_global,
-            dwell_time_active=dwell_time,
-            last_partition_id=last_partition if episode > 0 else None
+            partition_id=current_partition,  # ✅ Pass partition directly
+            target_hosts=target_hosts,  # ✅ Pass targets directly
+            is_switch=is_switch_this_episode,  # ✅ Pass is_switch directly
+            dwell_time_active=dwell_time
         )
+        
+        # ✅ FIX: Update last_partition FOR NEXT ITERATION
+        last_partition = current_partition
         
         # Add metadata
         episode_metrics.update({
@@ -262,7 +273,7 @@ def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
             'config_id': config_id,
             'episode': episode,
             'attacker_mode': config['attacker']['strategy'],
-            'defender_type': defender_type,  # Add defender type
+            'defender_type': defender_type,
         })
         
         # Log to CSV
@@ -274,13 +285,15 @@ def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
             recent_tsh = np.mean([m['tsh'] for m in all_metrics[-100:]])
             recent_coverage = np.mean([m['coverage'] for m in all_metrics[-100:]])
             recent_mutations = np.mean([m['mutation_count'] for m in all_metrics[-100:]])
+            recent_switches = sum([m['is_switch'] for m in all_metrics[-100:]])
             print(f"[Seed {seed}] Episode {episode+1}/{episodes_train}: "
                   f"TSH={recent_tsh:.2f}, Coverage={recent_coverage:.3f}, "
-                  f"Mutations={recent_mutations:.1f}")
+                  f"Mutations={recent_mutations:.1f}, Switches={recent_switches}")
     
     metrics_logger.close()
     
     print(f"[Seed {seed}] Computing windowed metrics...")
+    print(f"[Seed {seed}] Total switches detected: {len(switch_points)} at episodes {switch_points}")
     
     # Compute windowed metrics
     window_size = config['metrics']['window']
@@ -319,7 +332,7 @@ def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
         'adaptation_lags': adaptation_lags,
         'median_adaptation_lag': float(np.median(adaptation_lags)) if adaptation_lags else None,
         'mean_qos_proxy_ms': float(np.mean([m['qos_penalty_proxy_ms'] for m in all_metrics])),
-        'mean_mutation_count': float(np.mean(mutation_counts)),  # RENAMED
+        'mean_mutation_count': float(np.mean(mutation_counts)),
         # Mutation-specific statistics
         'mean_dwell_time': float(np.mean(dwell_times)),
         'mean_mutation_saturation': float(np.mean(mutation_saturations)),
@@ -335,7 +348,8 @@ def run_experiment(config: Dict, seed: int, output_dir: Path) -> Dict:
     print(f"[Seed {seed}] Completed. TSH median: {summary['tsh_median']:.2f}, "
           f"TSH/100 median: {summary['tsh_per_100_median']:.2f}, "
           f"Coverage final: {summary['coverage_final']:.3f}, "
-          f"Mutations: {summary['total_mutation_events']}")
+          f"Mutations: {summary['total_mutation_events']}, "
+          f"Switches: {summary['n_switches']}")
     
     return summary
 
@@ -375,8 +389,8 @@ def aggregate_results(summaries: List[Dict], config: Dict, output_dir: Path):
         'adaptation_lag_iqr': [float(np.percentile(adaptation_lags_all, 25)),
                                float(np.percentile(adaptation_lags_all, 75))] if adaptation_lags_all else None,
         'mean_qos_proxy_ms': float(np.mean(qos_means)),
-        'mean_mutation_count': float(np.mean(mutation_counts)),  # RENAMED
-        'mean_address_entropy': float(np.mean(address_entropies)),  # NEW
+        'mean_mutation_count': float(np.mean(mutation_counts)),
+        'mean_address_entropy': float(np.mean(address_entropies)),
         'seed_summaries': summaries
     }
     
@@ -405,7 +419,7 @@ def aggregate_results(summaries: List[Dict], config: Dict, output_dir: Path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Run ID-HAM experiment with TRUE ADDRESS MUTATION'
+        description='Run ID-HAM experiment with TRUE ADDRESS MUTATION (FIXED VERSION)'
     )
     parser.add_argument(
         '--config',
