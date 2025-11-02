@@ -1,0 +1,28 @@
+# ID-HAM Dependencies
+# Compatible with uv package manager
+
+# Deep Learning
+tensorflow>=2.9.0,<2.16.0  # TF 2.x with 1.x compatibility mode
+# Alternative for older systems: tensorflow==1.15.5
+
+# Constraint Solving
+z3-solver>=4.11.0
+
+# Network Analysis
+networkx>=2.5,<3.0
+
+# Numerical Computing
+numpy>=1.19.0,<2.0
+
+# Visualization
+matplotlib>=3.3.0
+
+# SDN Controller (optional - only needed for actual deployment)
+# ryu>=4.34  # Uncomment if you want to use Ryu controller
+
+# Utilities
+tqdm>=4.60.0  # Progress bars (optional but nice)
+
+# Development/Testing (optional)
+pytest>=7.0.0
+pytest-cov>=3.0.0
