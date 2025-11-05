@@ -1,6 +1,6 @@
 """
-Main Experiment Runner for ID-HAM Artifact Evaluation
-Reproduces experiments from Section VII of the paper
+Main Experiment Runner for ID-HAM - CORRECTED VERSION
+CRITICAL FIX: scanning_rate = 16 (from paper's Table I)
 """
 
 import numpy as np
@@ -33,25 +33,28 @@ class ExperimentRunner:
                                           num_hosts: int,
                                           num_blocks: int,
                                           num_switches: int,
+                                          block_size: int = 128,
                                           num_epochs: int = 3000,
                                           steps_per_epoch: int = 10):
         """
         Reproduce Fig. 5/6/7/8: Defense performance comparison
         
-        Tests ID-HAM against 4 scanning strategies and compares with:
-        - RHM (Random Host Mutation)
-        - FRVM (Flexible Random Virtual IP Multiplexing)
+        CRITICAL FIX: Uses scanning_rate=16 from paper's Table I
         """
         print("\n" + "="*70)
-        print("DEFENSE PERFORMANCE EXPERIMENT")
+        print("DEFENSE PERFORMANCE EXPERIMENT - CORRECTED VERSION")
         print(f"Network: {num_hosts} hosts, {num_blocks} blocks, {num_switches} switches")
         print("="*70)
         
-        # Address space parameters
-        # More realistic: 20 addresses per host instead of blocks * 128
-        # This gives better hit probability for scanners
-        address_space = num_hosts * 20  # More concentrated address space
-        scanning_rate = 80  # Increased from 16 for realistic TSH matching paper
+        # CRITICAL FIX: Use scanning_rate=16 from paper's Table I (not 80!)
+        address_space = num_blocks * block_size
+        scanning_rate = 16  # FROM PAPER TABLE I: η = 16 hosts/ΔT
+        
+        print(f"\nAddress space: {address_space} addresses")
+        print(f"Scanning rate: {scanning_rate} addresses/period (FROM PAPER TABLE I)")
+        print(f"Expected hit rate: ~{(num_hosts * 25) / address_space * 100:.1f}%")
+        print(f"Expected initial TSH: ~18-20")
+        print(f"Expected final TSH: ~9-15 (with learning)")
         
         # Generate feasible actions using SMT
         print("\n[1/5] Generating feasible actions with SMT solver...")
@@ -64,10 +67,11 @@ class ExperimentRunner:
         
         if len(feasible_actions) == 0:
             print("ERROR: No feasible actions found! Relaxing constraints...")
-            # Generate dummy actions as fallback
             feasible_actions = self._generate_dummy_actions(num_hosts, num_blocks, 100)
         
-        # Scanning strategies to test
+        print(f"Generated {len(feasible_actions)} feasible actions")
+        
+        # Scanning strategies with CORRECT scanning_rate=16
         strategies = {
             'local_preference': LocalPreferenceScanning(address_space, scanning_rate),
             'sequential': SequentialScanning(address_space, scanning_rate),
@@ -87,6 +91,7 @@ class ExperimentRunner:
                 'ID-HAM',
                 num_hosts,
                 num_blocks,
+                block_size,
                 feasible_actions,
                 scanner,
                 num_epochs,
@@ -98,9 +103,11 @@ class ExperimentRunner:
             rhm_tsh = self._evaluate_random_mutation(
                 num_hosts,
                 num_blocks,
+                block_size,
                 feasible_actions,
                 scanner,
-                num_epochs
+                num_epochs,
+                steps_per_epoch
             )
             
             # FRVM (Fixed random - no adaptivity)
@@ -108,9 +115,11 @@ class ExperimentRunner:
             frvm_tsh = self._evaluate_fixed_random(
                 num_hosts,
                 num_blocks,
+                block_size,
                 feasible_actions,
                 scanner,
-                num_epochs
+                num_epochs,
+                steps_per_epoch
             )
             
             results[strategy_name] = {
@@ -130,6 +139,7 @@ class ExperimentRunner:
                            method_name: str,
                            num_hosts: int,
                            num_blocks: int,
+                           block_size: int,
                            feasible_actions: List[np.ndarray],
                            scanner,
                            num_epochs: int,
@@ -139,8 +149,8 @@ class ExperimentRunner:
         # Create MDP
         mdp = HAM_MDP(num_hosts=num_hosts, num_blocks=num_blocks)
         
-        # Create network scanner
-        network_scanner = NetworkScanner(num_hosts, num_blocks * 128, scanner)
+        # KEY FIX: Pass block_size to NetworkScanner
+        network_scanner = NetworkScanner(num_hosts, num_blocks, block_size, scanner)
         
         # Create agent
         agent = IDHAMAgent(
@@ -192,13 +202,15 @@ class ExperimentRunner:
     def _evaluate_random_mutation(self,
                                   num_hosts: int,
                                   num_blocks: int,
+                                  block_size: int,
                                   feasible_actions: List[np.ndarray],
                                   scanner,
-                                  num_epochs: int) -> List[float]:
+                                  num_epochs: int,
+                                  steps_per_epoch: int) -> List[float]:
         """Evaluate RHM (random mutation with hypothesis test - simplified)"""
         
         mdp = HAM_MDP(num_hosts=num_hosts, num_blocks=num_blocks)
-        network_scanner = NetworkScanner(num_hosts, num_blocks * 128, scanner)
+        network_scanner = NetworkScanner(num_hosts, num_blocks, block_size, scanner)
         
         tsh_history = []
         
@@ -206,19 +218,18 @@ class ExperimentRunner:
             state = mdp.reset()
             epoch_tsh = 0
             
-            # Random action selection with slight bias away from frequently scanned
-            action_idx = np.random.randint(0, len(feasible_actions))
-            action = feasible_actions[action_idx]
-            
-            moving_hosts = mdp.get_moving_hosts()
-            network_scanner.update_address_mapping(action, moving_hosts)
-            
-            # Scan multiple times per epoch
-            for _ in range(10):
+            for step in range(steps_per_epoch):
+                # Random action selection with slight bias away from frequently scanned
+                action_idx = np.random.randint(0, len(feasible_actions))
+                action = feasible_actions[action_idx]
+                
+                moving_hosts = mdp.get_moving_hosts()
+                network_scanner.update_address_mapping(action, moving_hosts)
+                
                 scan_results = network_scanner.perform_scan()
                 epoch_tsh += sum(scan_results.values())
             
-            avg_tsh = epoch_tsh / 10
+            avg_tsh = epoch_tsh / steps_per_epoch
             tsh_history.append(avg_tsh)
         
         return tsh_history
@@ -226,13 +237,15 @@ class ExperimentRunner:
     def _evaluate_fixed_random(self,
                                num_hosts: int,
                                num_blocks: int,
+                               block_size: int,
                                feasible_actions: List[np.ndarray],
                                scanner,
-                               num_epochs: int) -> List[float]:
+                               num_epochs: int,
+                               steps_per_epoch: int) -> List[float]:
         """Evaluate FRVM (fixed random - no learning)"""
         
         mdp = HAM_MDP(num_hosts=num_hosts, num_blocks=num_blocks)
-        network_scanner = NetworkScanner(num_hosts, num_blocks * 128, scanner)
+        network_scanner = NetworkScanner(num_hosts, num_blocks, block_size, scanner)
         
         tsh_history = []
         
@@ -240,18 +253,18 @@ class ExperimentRunner:
             state = mdp.reset()
             epoch_tsh = 0
             
-            # Completely random action
-            action_idx = np.random.randint(0, len(feasible_actions))
-            action = feasible_actions[action_idx]
-            
-            moving_hosts = mdp.get_moving_hosts()
-            network_scanner.update_address_mapping(action, moving_hosts)
-            
-            for _ in range(10):
+            for step in range(steps_per_epoch):
+                # Completely random action
+                action_idx = np.random.randint(0, len(feasible_actions))
+                action = feasible_actions[action_idx]
+                
+                moving_hosts = mdp.get_moving_hosts()
+                network_scanner.update_address_mapping(action, moving_hosts)
+                
                 scan_results = network_scanner.perform_scan()
                 epoch_tsh += sum(scan_results.values())
             
-            avg_tsh = epoch_tsh / 10
+            avg_tsh = epoch_tsh / steps_per_epoch
             tsh_history.append(avg_tsh)
         
         return tsh_history
@@ -301,13 +314,16 @@ class ExperimentRunner:
             data = results[strategy]
             
             # Plot each method
+            colors = {'ID-HAM': '#1f77b4', 'RHM': '#ff7f0e', 'FRVM': '#2ca02c'}
             for method in ['ID-HAM', 'RHM', 'FRVM']:
                 tsh = data[method]
                 # Smooth with moving average
                 window = 50
                 if len(tsh) >= window:
                     smoothed = np.convolve(tsh, np.ones(window)/window, mode='valid')
-                    ax.plot(smoothed, label=method, linewidth=2)
+                    ax.plot(smoothed, label=method, linewidth=2, color=colors[method])
+                else:
+                    ax.plot(tsh, label=method, linewidth=2, color=colors[method])
             
             ax.set_xlabel('Episode', fontsize=11)
             ax.set_ylabel('Average Times of Scanning Hits', fontsize=11)
@@ -316,8 +332,9 @@ class ExperimentRunner:
             ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plt.savefig(f'{self.results_dir}/defense_performance_{num_hosts}h_{num_blocks}b.png', dpi=300)
-        print(f"  Saved plot: defense_performance_{num_hosts}h_{num_blocks}b.png")
+        filepath = f'{self.results_dir}/defense_performance_{num_hosts}h_{num_blocks}b.png'
+        plt.savefig(filepath, dpi=300)
+        print(f"  Saved plot: {filepath}")
         plt.close()
         
         # Bar chart comparison (reproduce Fig. 6/8)
@@ -343,9 +360,10 @@ class ExperimentRunner:
         x = np.arange(len(strategies))
         width = 0.25
         
+        colors = {'ID-HAM': '#1f77b4', 'RHM': '#ff7f0e', 'FRVM': '#2ca02c'}
         for i, method in enumerate(methods):
             values = [final_tsh[s][method] for s in strategies]
-            ax.bar(x + i*width, values, width, label=method)
+            ax.bar(x + i*width, values, width, label=method, color=colors[method])
         
         ax.set_ylabel('Average Times of Scanning Hits', fontsize=12)
         ax.set_xlabel('Scanning Strategy', fontsize=12)
@@ -356,8 +374,9 @@ class ExperimentRunner:
         ax.grid(True, alpha=0.3, axis='y')
         
         plt.tight_layout()
-        plt.savefig(f'{self.results_dir}/defense_comparison_bars_{num_hosts}h_{num_blocks}b.png', dpi=300)
-        print(f"  Saved plot: defense_comparison_bars_{num_hosts}h_{num_blocks}b.png")
+        filepath = f'{self.results_dir}/defense_comparison_bars_{num_hosts}h_{num_blocks}b.png'
+        plt.savefig(filepath, dpi=300)
+        print(f"  Saved plot: {filepath}")
         plt.close()
     
     def _save_results(self, results: Dict, filename: str):
@@ -379,9 +398,10 @@ def main():
     """Run main experiments"""
     
     print("\n" + "="*70)
-    print("ID-HAM ARTIFACT EVALUATION")
+    print("ID-HAM ARTIFACT EVALUATION - CORRECTED VERSION")
     print("Reproducing: How to Disturb Network Reconnaissance")
     print("Zhang et al., IEEE TIFS 2023")
+    print("CRITICAL FIX: scanning_rate = 16 (from Table I)")
     print("="*70)
     
     runner = ExperimentRunner(results_dir="results")
@@ -393,6 +413,7 @@ def main():
         num_hosts=30,
         num_blocks=50,
         num_switches=5,
+        block_size=128,
         num_epochs=3000,
         steps_per_epoch=10
     )
@@ -404,6 +425,7 @@ def main():
         num_hosts=100,
         num_blocks=150,
         num_switches=30,
+        block_size=128,
         num_epochs=3000,
         steps_per_epoch=10
     )

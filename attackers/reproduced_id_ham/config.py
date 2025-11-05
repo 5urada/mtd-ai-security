@@ -83,7 +83,7 @@ TRAINING_PARAMS = {
 
 # Scanning Parameters (Section III-A, Table I)
 SCANNING_PARAMS = {
-    'scanning_rate': 80,  # η hosts per ΔT (increased from 16 for realistic TSH)
+    'scanning_rate': 16,  # η hosts per ΔT (increased from 16 for realistic TSH)
     'address_space_multiplier': 20,  # Address space = num_hosts * 20 (more realistic)
     
     # Local Preference Scanning
