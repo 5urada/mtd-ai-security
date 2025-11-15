@@ -1,6 +1,6 @@
 """
-Main Experiment Runner for ID-HAM - CORRECTED VERSION
-CRITICAL FIX: scanning_rate = 16 (from paper's Table I)
+Main Experiment Runner for ID-HAM - IMPROVED VERSION
+Uses block-aware MDP and tracks scanned addresses
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ import json
 import os
 from datetime import datetime
 
-from mdp_model import HAM_MDP
+from mdp_model_improved import ImprovedHAM_MDP
 from smt_constraints import generate_feasible_actions
 from actor_critic import IDHAMAgent
 from scanning_strategies import (
@@ -39,22 +39,19 @@ class ExperimentRunner:
         """
         Reproduce Fig. 5/6/7/8: Defense performance comparison
         
-        CRITICAL FIX: Uses scanning_rate=16 from paper's Table I
+        IMPROVED: Uses block-aware MDP and tracks scanned addresses
         """
         print("\n" + "="*70)
-        print("DEFENSE PERFORMANCE EXPERIMENT - CORRECTED VERSION")
+        print("DEFENSE PERFORMANCE EXPERIMENT - IMPROVED VERSION")
         print(f"Network: {num_hosts} hosts, {num_blocks} blocks, {num_switches} switches")
         print("="*70)
         
-        # CRITICAL FIX: Use scanning_rate=16 from paper's Table I (not 80!)
         address_space = num_blocks * block_size
-        scanning_rate = 16  # FROM PAPER TABLE I: η = 16 hosts/ΔT
+        scanning_rate = 16
         
         print(f"\nAddress space: {address_space} addresses")
-        print(f"Scanning rate: {scanning_rate} addresses/period (FROM PAPER TABLE I)")
+        print(f"Scanning rate: {scanning_rate} addresses/period")
         print(f"Expected hit rate: ~{(num_hosts * 25) / address_space * 100:.1f}%")
-        print(f"Expected initial TSH: ~18-20")
-        print(f"Expected final TSH: ~9-15 (with learning)")
         
         # Generate feasible actions using SMT
         print("\n[1/5] Generating feasible actions with SMT solver...")
@@ -71,7 +68,7 @@ class ExperimentRunner:
         
         print(f"Generated {len(feasible_actions)} feasible actions")
         
-        # Scanning strategies with CORRECT scanning_rate=16
+        # Scanning strategies
         strategies = {
             'local_preference': LocalPreferenceScanning(address_space, scanning_rate),
             'sequential': SequentialScanning(address_space, scanning_rate),
@@ -98,9 +95,9 @@ class ExperimentRunner:
                 steps_per_epoch
             )
             
-            # RHM (Random mutation - baseline with some adaptivity)
+            # RHM (Improved with hypothesis test)
             print("  Evaluating RHM...")
-            rhm_tsh = self._evaluate_random_mutation(
+            rhm_tsh = self._evaluate_rhm_improved(
                 num_hosts,
                 num_blocks,
                 block_size,
@@ -144,15 +141,19 @@ class ExperimentRunner:
                            scanner,
                            num_epochs: int,
                            steps_per_epoch: int) -> List[float]:
-        """Train ID-HAM and evaluate average TSH over epochs"""
+        """
+        Train ID-HAM and evaluate average TSH over epochs
         
-        # Create MDP
-        mdp = HAM_MDP(num_hosts=num_hosts, num_blocks=num_blocks)
+        IMPROVED: Uses ImprovedHAM_MDP with block-aware rewards
+        """
         
-        # KEY FIX: Pass block_size to NetworkScanner
+        # Create IMPROVED MDP
+        mdp = ImprovedHAM_MDP(num_hosts=num_hosts, num_blocks=num_blocks, block_size=block_size)
+        
+        # Create network scanner
         network_scanner = NetworkScanner(num_hosts, num_blocks, block_size, scanner)
         
-        # Create agent
+        # Create agent (note: state dim is now larger!)
         agent = IDHAMAgent(
             mdp=mdp,
             feasible_actions=feasible_actions,
@@ -160,13 +161,15 @@ class ExperimentRunner:
             learning_rate_critic=0.001
         )
         
-        # Track TSH over episodes
+        # Track TSH and rewards
         tsh_history = []
+        rewards_per_epoch = []
         
         # Training loop
         for epoch in range(num_epochs):
             state = mdp.reset()
             epoch_tsh = 0
+            epoch_rewards = []
             
             for step in range(steps_per_epoch):
                 # Select action
@@ -177,12 +180,15 @@ class ExperimentRunner:
                 moving_hosts = mdp.get_moving_hosts()
                 network_scanner.update_address_mapping(action, moving_hosts)
                 
-                # Perform scanning
-                scan_results = network_scanner.perform_scan()
+                # Perform scanning - NOW RETURNS TWO VALUES
+                scan_results, scanned_addresses = network_scanner.perform_scan()
                 epoch_tsh += sum(scan_results.values())
                 
-                # Update MDP
-                next_state, reward, done = mdp.step(action, scan_results)
+                # Update MDP - NOW TAKES THREE ARGUMENTS
+                next_state, reward, done = mdp.step(action, scan_results, scanned_addresses)
+                
+                # Track reward
+                epoch_rewards.append(reward)
                 
                 # Update network
                 agent.ac_network.update(state, action_idx, reward, next_state)
@@ -192,42 +198,109 @@ class ExperimentRunner:
             # Average TSH for this epoch
             avg_tsh = epoch_tsh / steps_per_epoch
             tsh_history.append(avg_tsh)
+            rewards_per_epoch.append(epoch_rewards)
             
+            # Print progress with diagnostics
             if (epoch + 1) % 500 == 0:
                 recent_avg = np.mean(tsh_history[-100:])
-                print(f"    Epoch {epoch+1}/{num_epochs} - Avg TSH: {recent_avg:.2f}")
+                recent_rewards = [r for epoch_r in rewards_per_epoch[-100:] for r in epoch_r]
+                reward_std = np.std(recent_rewards)
+                
+                # Block scan heat (top 5)
+                top_heat = np.sort(mdp.block_scan_history)[-5:]
+                
+                print(f"    Epoch {epoch+1}/{num_epochs}")
+                print(f"      Avg TSH: {recent_avg:.2f}")
+                print(f"      Reward std: {reward_std:.3f}")
+                print(f"      Top block heat: {top_heat}")
+        
+        # Verify reward variance
+        all_rewards = [r for epoch_r in rewards_per_epoch for r in epoch_r]
+        reward_std = np.std(all_rewards)
+        
+        print(f"\n  Training complete!")
+        print(f"    Final TSH: {np.mean(tsh_history[-50:]):.2f}")
+        print(f"    Reward std: {reward_std:.3f}")
+        
+        if reward_std < 1.0:
+            print(f"    ⚠ WARNING: Low reward variance ({reward_std:.3f})")
+            print(f"       Agent may struggle to differentiate actions")
+        else:
+            print(f"    ✓ Reward variance is good ({reward_std:.3f})")
         
         return tsh_history
     
-    def _evaluate_random_mutation(self,
-                                  num_hosts: int,
-                                  num_blocks: int,
-                                  block_size: int,
-                                  feasible_actions: List[np.ndarray],
-                                  scanner,
-                                  num_epochs: int,
-                                  steps_per_epoch: int) -> List[float]:
-        """Evaluate RHM (random mutation with hypothesis test - simplified)"""
+    def _evaluate_rhm_improved(self,
+                               num_hosts: int,
+                               num_blocks: int,
+                               block_size: int,
+                               feasible_actions: List[np.ndarray],
+                               scanner,
+                               num_epochs: int,
+                               steps_per_epoch: int) -> List[float]:
+        """
+        Evaluate RHM with simplified hypothesis test
         
-        mdp = HAM_MDP(num_hosts=num_hosts, num_blocks=num_blocks)
+        IMPROVED: Now tracks scanning patterns and avoids hot blocks
+        """
+        
+        mdp = ImprovedHAM_MDP(num_hosts=num_hosts, num_blocks=num_blocks, block_size=block_size)
         network_scanner = NetworkScanner(num_hosts, num_blocks, block_size, scanner)
         
         tsh_history = []
+        
+        # Track block scan counts for hypothesis test
+        cumulative_block_scans = np.zeros(num_blocks)
+        test_interval = 100  # Test every 100 epochs
         
         for epoch in range(num_epochs):
             state = mdp.reset()
             epoch_tsh = 0
             
             for step in range(steps_per_epoch):
-                # Random action selection with slight bias away from frequently scanned
-                action_idx = np.random.randint(0, len(feasible_actions))
+                # Every test_interval epochs, do hypothesis test
+                if epoch > 0 and epoch % test_interval == 0:
+                    # Simple test: are some blocks scanned much more than others?
+                    if np.max(cumulative_block_scans) > 3 * np.mean(cumulative_block_scans):
+                        # Non-uniform scanning detected
+                        # Bias action selection away from hot blocks
+                        block_heat = cumulative_block_scans / np.max(cumulative_block_scans)
+                        
+                        # Score actions by how much they avoid hot blocks
+                        action_scores = []
+                        for action in feasible_actions:
+                            # Average heat of blocks used by this action
+                            used_blocks = np.where(action.sum(axis=0) > 0)[0]
+                            if len(used_blocks) > 0:
+                                avg_heat = np.mean(block_heat[used_blocks])
+                                action_scores.append(1.0 - avg_heat)  # Lower heat = higher score
+                            else:
+                                action_scores.append(0.5)
+                        
+                        # Sample action with bias towards low-heat actions
+                        probs = np.array(action_scores)
+                        probs = probs / np.sum(probs)
+                        action_idx = np.random.choice(len(feasible_actions), p=probs)
+                    else:
+                        # Uniform scanning - random action
+                        action_idx = np.random.randint(0, len(feasible_actions))
+                else:
+                    # Random action
+                    action_idx = np.random.randint(0, len(feasible_actions))
+                
                 action = feasible_actions[action_idx]
                 
                 moving_hosts = mdp.get_moving_hosts()
                 network_scanner.update_address_mapping(action, moving_hosts)
                 
-                scan_results = network_scanner.perform_scan()
+                scan_results, scanned_addresses = network_scanner.perform_scan()
                 epoch_tsh += sum(scan_results.values())
+                
+                # Update cumulative block scans
+                for addr in scanned_addresses:
+                    block_id = addr // block_size
+                    if 0 <= block_id < num_blocks:
+                        cumulative_block_scans[block_id] += 1
             
             avg_tsh = epoch_tsh / steps_per_epoch
             tsh_history.append(avg_tsh)
@@ -244,7 +317,7 @@ class ExperimentRunner:
                                steps_per_epoch: int) -> List[float]:
         """Evaluate FRVM (fixed random - no learning)"""
         
-        mdp = HAM_MDP(num_hosts=num_hosts, num_blocks=num_blocks)
+        mdp = ImprovedHAM_MDP(num_hosts=num_hosts, num_blocks=num_blocks, block_size=block_size)
         network_scanner = NetworkScanner(num_hosts, num_blocks, block_size, scanner)
         
         tsh_history = []
@@ -261,7 +334,7 @@ class ExperimentRunner:
                 moving_hosts = mdp.get_moving_hosts()
                 network_scanner.update_address_mapping(action, moving_hosts)
                 
-                scan_results = network_scanner.perform_scan()
+                scan_results, scanned_addresses = network_scanner.perform_scan()
                 epoch_tsh += sum(scan_results.values())
             
             avg_tsh = epoch_tsh / steps_per_epoch
@@ -277,17 +350,13 @@ class ExperimentRunner:
         for _ in range(num_actions):
             action = np.zeros((num_hosts, num_blocks))
             
-            # Track which blocks are used
             used_blocks = set()
             
             for host in range(num_hosts):
-                # Assign 2-4 random blocks to each host
                 num_blocks_assign = np.random.randint(2, min(5, num_blocks // num_hosts + 1))
                 
-                # Get available blocks
                 available = [b for b in range(num_blocks) if b not in used_blocks]
                 if len(available) < num_blocks_assign:
-                    # Reuse some blocks if running out
                     available = list(range(num_blocks))
                 
                 blocks = np.random.choice(available, num_blocks_assign, replace=False)
@@ -337,7 +406,7 @@ class ExperimentRunner:
         print(f"  Saved plot: {filepath}")
         plt.close()
         
-        # Bar chart comparison (reproduce Fig. 6/8)
+        # Bar chart comparison
         self._plot_comparison_bars(results, num_hosts, num_blocks)
     
     def _plot_comparison_bars(self, results: Dict, num_hosts: int, num_blocks: int):
@@ -381,7 +450,6 @@ class ExperimentRunner:
     
     def _save_results(self, results: Dict, filename: str):
         """Save results to JSON"""
-        # Convert numpy arrays to lists for JSON serialization
         serializable_results = {}
         for strategy, data in results.items():
             serializable_results[strategy] = {}
@@ -398,13 +466,13 @@ def main():
     """Run main experiments"""
     
     print("\n" + "="*70)
-    print("ID-HAM ARTIFACT EVALUATION - CORRECTED VERSION")
+    print("ID-HAM ARTIFACT EVALUATION - IMPROVED VERSION")
     print("Reproducing: How to Disturb Network Reconnaissance")
     print("Zhang et al., IEEE TIFS 2023")
-    print("CRITICAL FIX: scanning_rate = 16 (from Table I)")
+    print("WITH BLOCK-AWARE REWARDS AND SCANNING HISTORY")
     print("="*70)
     
-    runner = ExperimentRunner(results_dir="results")
+    runner = ExperimentRunner(results_dir="results_improved")
     
     # Experiment 1: Small network (matches Fig. 5-6)
     print("\n\nEXPERIMENT 1: Small Network Scenario")
@@ -418,21 +486,21 @@ def main():
         steps_per_epoch=10
     )
     
-    # Experiment 2: Large network (matches Fig. 7-8)
-    print("\n\nEXPERIMENT 2: Large Network Scenario")
-    print("-" * 70)
-    results_large = runner.run_defense_performance_experiment(
-        num_hosts=100,
-        num_blocks=150,
-        num_switches=30,
-        block_size=128,
-        num_epochs=3000,
-        steps_per_epoch=10
-    )
+    # Print final results
+    print("\n" + "="*70)
+    print("FINAL RESULTS - SMALL NETWORK")
+    print("="*70)
+    for strategy, data in results_small.items():
+        print(f"\n{strategy.upper().replace('_', ' ')}:")
+        for method, tsh in data.items():
+            final = np.mean(tsh[-100:])
+            initial = np.mean(tsh[:100])
+            improvement = ((initial - final) / initial) * 100
+            print(f"  {method:10s}: Final={final:.2f}, Initial={initial:.2f}, Improvement={improvement:.1f}%")
     
     print("\n" + "="*70)
     print("EXPERIMENTS COMPLETED!")
-    print("Results saved in 'results/' directory")
+    print("Results saved in 'results_improved/' directory")
     print("="*70)
 
 
